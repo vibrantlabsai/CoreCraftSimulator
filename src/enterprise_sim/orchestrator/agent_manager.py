@@ -57,6 +57,7 @@ class PiAgent:
         self._proc: subprocess.Popen | None = None
         self._is_resolved = False
         self.timeout: int = 120  # seconds; overridden by WorldConfig via AgentPool
+        self.last_trace: dict | None = None
 
         # Detect agent type and load config file
         role_path = agent_dir / "role.json"
@@ -166,7 +167,9 @@ class PiAgent:
         self._proc.stdin.write(cmd)
         self._proc.stdin.flush()
 
+        start_time = time.monotonic()
         result_queue: queue.Queue[str] = queue.Queue()
+        tool_calls = []
 
         def _read_loop():
             all_text_parts = []
@@ -191,6 +194,10 @@ class PiAgent:
                         # Intercept mark_resolved tool calls
                         if event.get("toolName") == "mark_resolved" and not event.get("isError"):
                             self._is_resolved = True
+                        tool_calls.append({
+                            "tool": event.get("toolName", ""),
+                            "error": event.get("isError", False),
+                        })
                     elif event_type == "turn_end":
                         # Accumulate text from all turn_end events
                         message = event.get("message", {})
@@ -220,7 +227,16 @@ class PiAgent:
             print(f"[Agent {self.agent_id}] TIMEOUT after {self.timeout}s. stderr: {stderr_output[:500]}")
             raise TimeoutError(f"Agent {self.agent_id} timed out after {self.timeout}s")
 
-        return result_queue.get_nowait()
+        response = result_queue.get_nowait()
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+
+        self.last_trace = {
+            "raw_response": response,
+            "tool_calls": tool_calls,
+            "duration_ms": duration_ms,
+        }
+
+        return response
 
     def respond(self, tool_name: str, tool_args: dict) -> ScenarioResponse:
         """Generate a customer response to a support agent action."""
@@ -340,6 +356,8 @@ CURRENT ISSUE:
 
 You have one tool available: mark_resolved. You MUST call it when your issue is fully resolved.
 
+If the support agent tries to resolve your issue without fully understanding it, without looking up your order details, or without properly investigating, express frustration and insist they investigate properly before jumping to conclusions.
+
 RESPONSE FORMAT:
 1. Write your reply (1-3 sentences, in character). React naturally — warm up if the agent is helpful, get frustrated if they are dismissive or slow.
 2. At the END of every response, include exactly one XML tag:
@@ -405,6 +423,13 @@ Internal messaging:
 - esim list-channels --agent-id {role['id']}
 
 Company docs are available at /work_context/ — read them with the read tool if you need to check policies.
+
+IMPORTANT INTERACTION GUIDELINES:
+- NEVER resolve a ticket on your first interaction. Always gather information first.
+- Your first response should acknowledge the issue and ask clarifying questions or look up relevant data.
+- Only offer a resolution after you understand the full picture (customer history, order details, applicable policies).
+- Do NOT mark a ticket as resolved until you've confirmed the customer accepts your proposed solution.
+
 Be decisive and focus on resolution. Support your team."""
 
         return f"""You are {role['name']}, a {role['role']} at an office furniture company.
@@ -444,7 +469,13 @@ For each customer interaction:
 4. Follow escalation policy for refunds above ${refund_limit:.2f}
 5. Update the ticket status as you work
 
-Always acknowledge the customer's feelings. Be thorough but efficient."""
+Always acknowledge the customer's feelings. Be thorough but efficient.
+
+IMPORTANT INTERACTION GUIDELINES:
+- NEVER resolve a ticket on your first interaction. Always gather information first.
+- Your first response should acknowledge the issue and ask clarifying questions or look up relevant data.
+- Only offer a resolution after you understand the full picture (customer history, order details, applicable policies).
+- Do NOT mark a ticket as resolved until you've confirmed the customer accepts your proposed solution."""
 
     def _build_reply_prompt(self, message: str) -> str:
         return f"""The support agent has replied to your ticket:

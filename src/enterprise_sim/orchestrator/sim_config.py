@@ -7,6 +7,17 @@ from pathlib import Path
 
 
 @dataclass
+class TicketPacing:
+    """Time-aware, personality-driven ticket pacing configuration."""
+
+    base_probability: float = 0.10
+    rush_hour_multiplier: float = 2.5  # applied during 9-10 AM, 1-2 PM
+    quiet_multiplier: float = 0.3  # applied outside business hours
+    patience_modifier: bool = True  # impatient customers file more often
+    max_active_tickets: int = 2  # allow concurrent tickets per customer
+
+
+@dataclass
 class WorldConfig:
     """Configuration for a simulation run."""
 
@@ -18,6 +29,7 @@ class WorldConfig:
     seed: int | None = None
     output_dir: Path | None = None
     agent_timeout_seconds: int = 120
+    pacing: TicketPacing = field(default_factory=TicketPacing)
 
 
 @dataclass

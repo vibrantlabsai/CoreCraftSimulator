@@ -75,6 +75,17 @@ class SimulationEngine:
                 details TEXT,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS sim_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tick INTEGER NOT NULL,
+                agent_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                prompt_sent TEXT,
+                raw_response TEXT,
+                tool_calls TEXT,
+                duration_ms INTEGER,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         conn.execute(
             "INSERT OR REPLACE INTO sim_clock (id, current_tick, sim_time) VALUES (1, 0, ?)",

@@ -58,6 +58,8 @@ class TickProcessor:
             respond_work = []  # (agent_id, agent, ticket_id, agent_message)
             file_work = []     # (agent_id, agent)
 
+            pacing = self.config.pacing
+
             for agent_id, agent in self.pool.customers.items():
                 # Check for tickets needing customer response
                 tickets = conn.execute(
@@ -73,12 +75,29 @@ class TickProcessor:
                     if last_msg and last_msg["sender_role"] == "agent":
                         respond_work.append((agent_id, agent, tid, last_msg["content"]))
 
-                # Check if customer might file a new ticket
+                # Check if customer might file a new ticket (time-aware, personality-driven)
                 open_count = conn.execute(
                     "SELECT COUNT(*) FROM tickets WHERE customer_id = ? AND status IN ('open', 'in_progress', 'escalated')",
                     (agent_id,),
                 ).fetchone()[0]
-                if open_count == 0 and self.rng.random() <= self.config.ticket_probability:
+                if open_count >= pacing.max_active_tickets:
+                    continue
+
+                # Calculate time-aware probability
+                hour = sim_time.hour
+                prob = pacing.base_probability
+
+                if hour in (9, 13):  # Rush hours: 9-10 AM, 1-2 PM
+                    prob *= pacing.rush_hour_multiplier
+                elif hour < 8 or hour >= 17:  # Outside business hours
+                    prob *= pacing.quiet_multiplier
+
+                # Personality modifier: impatient customers contact more
+                if pacing.patience_modifier:
+                    patience = agent._persona.get("patience_level", 0.5)
+                    prob *= (1.0 - patience + 0.5)  # low patience → higher probability
+
+                if self.rng.random() <= prob:
                     file_work.append((agent_id, agent))
 
             # --- Parallel LLM calls for customer responses ---
@@ -89,13 +108,13 @@ class TickProcessor:
                     for agent_id, agent, tid, msg in respond_work:
                         def _do_respond(a=agent, m=msg):
                             return a.respond("send_reply", {"message": m})
-                        futures[executor.submit(_do_respond)] = (agent_id, tid)
+                        futures[executor.submit(_do_respond)] = (agent_id, agent, tid)
 
                     for future in as_completed(futures):
-                        agent_id, tid = futures[future]
+                        agent_id, agent, tid = futures[future]
                         try:
                             response = future.result()
-                            respond_results.append((agent_id, tid, response))
+                            respond_results.append((agent_id, agent, tid, response))
                         except Exception as e:
                             print(f"[Tick {tick}] Customer {agent_id} respond error: {e}")
                             _log_event(conn, tick, "agent_error", agent_id, {"error": str(e), "phase": "customer_respond"})
@@ -106,7 +125,8 @@ class TickProcessor:
                                 pass
 
             # --- Write response results to DB sequentially ---
-            for agent_id, tid, response in respond_results:
+            for agent_id, agent, tid, response in respond_results:
+                _log_trace(conn, tick, agent_id, "customer_response", f"Agent replied on ticket #{tid}", agent)
                 if response.customer_message:
                     conn.execute(
                         "INSERT INTO ticket_messages (ticket_id, sender_id, sender_role, content, timestamp) VALUES (?, ?, 'customer', ?, ?)",
@@ -136,14 +156,14 @@ class TickProcessor:
                             )
                             parsed = a._parse_response(raw)
                             return parsed.customer_message or raw.strip()
-                        futures[executor.submit(_do_file)] = (agent_id,)
+                        futures[executor.submit(_do_file)] = (agent_id, agent)
 
                     for future in as_completed(futures):
-                        (agent_id,) = futures[future]
+                        agent_id, agent = futures[future]
                         try:
                             message = future.result()
                             if message:
-                                file_results.append((agent_id, message))
+                                file_results.append((agent_id, agent, message))
                         except Exception as e:
                             print(f"[Tick {tick}] Customer {agent_id} file-ticket error: {e}")
                             _log_event(conn, tick, "agent_error", agent_id, {"error": str(e), "phase": "customer_file"})
@@ -154,7 +174,8 @@ class TickProcessor:
                                 pass
 
             # --- Write new tickets to DB sequentially ---
-            for agent_id, message in file_results:
+            for agent_id, agent, message in file_results:
+                _log_trace(conn, tick, agent_id, "customer_new_ticket", "Filing new ticket", agent)
                 cursor = conn.execute(
                     "INSERT INTO tickets (customer_id, subject, status, priority, created_at) VALUES (?, ?, 'open', 'normal', ?)",
                     (agent_id, _extract_subject(message), sim_time.isoformat()),
@@ -233,12 +254,13 @@ class TickProcessor:
                     for agent_id, agent, perception, ticket_ids in work:
                         def _do_act(a=agent, p=perception):
                             a.send_message(p)
-                        futures[executor.submit(_do_act)] = (agent_id, ticket_ids)
+                        futures[executor.submit(_do_act)] = (agent_id, agent, perception, ticket_ids)
 
                     for future in as_completed(futures):
-                        agent_id, ticket_ids = futures[future]
+                        agent_id, agent, perception, ticket_ids = futures[future]
                         try:
                             future.result()
+                            _log_trace(conn, tick, agent_id, "employee", perception, agent)
                             summary.employee_actions += len(ticket_ids)
                             _log_event(conn, tick, "agent_acted", agent_id, {"tickets_handled": ticket_ids})
                         except Exception as e:
@@ -279,12 +301,17 @@ class TickProcessor:
                 (t["id"],),
             ).fetchone()
             if last_msg and last_msg["sender_role"] == "customer":
+                msg_count = conn.execute(
+                    "SELECT COUNT(*) FROM ticket_messages WHERE ticket_id = ?",
+                    (t["id"],),
+                ).fetchone()[0]
                 actionable.append({
                     "id": t["id"],
                     "subject": t["subject"],
                     "status": t["status"],
                     "customer_id": t["customer_id"],
                     "last_message": last_msg["content"],
+                    "message_count": msg_count,
                 })
 
         return actionable
@@ -297,6 +324,8 @@ class TickProcessor:
             lines.append(f"--- Ticket #{t['id']} ---")
             lines.append(f"Customer: {t['customer_id']} | Subject: {t['subject']} | Status: {t['status']}")
             lines.append(f"Latest message from customer:\n{t['last_message']}")
+            if t.get("message_count", 0) <= 2:
+                lines.append(">>> This is a new ticket. Gather information and investigate before proposing a resolution.")
             lines.append("")
 
         lines.append(
@@ -331,6 +360,7 @@ class TickProcessor:
                         agent.respawn()
                     perception = self._build_manager_perception(escalated, escalation_msgs, sim_time)
                     agent.send_message(perception)
+                    _log_trace(conn, tick, agent_id, "manager", perception, agent)
                     summary.manager_actions += 1
                     _log_event(conn, tick, "manager_acted", agent_id, {
                         "escalated_tickets": [dict(r)["id"] for r in escalated],
@@ -374,6 +404,17 @@ class TickProcessor:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _log_trace(conn, tick: int, agent_id: str, phase: str, prompt: str, agent) -> None:
+    """Write agent trace to sim_traces table."""
+    trace = getattr(agent, "last_trace", None)
+    if not trace:
+        return
+    conn.execute(
+        "INSERT INTO sim_traces (tick, agent_id, phase, prompt_sent, raw_response, tool_calls, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (tick, agent_id, phase, prompt, trace["raw_response"], json.dumps(trace["tool_calls"]), trace["duration_ms"]),
+    )
 
 
 def _extract_subject(message: str) -> str:
