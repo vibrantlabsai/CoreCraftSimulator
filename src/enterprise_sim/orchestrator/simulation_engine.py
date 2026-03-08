@@ -26,14 +26,16 @@ class SimulationEngine:
         self.rng = Random(config.seed)
         self.db_path: Path | None = None
         self.pool: AgentPool | None = None
+        self._start_tick: int = 0
+        self._start_time: datetime = datetime(2026, 3, 9, 9, 0, 0)
 
     def run(self) -> Path:
         """Run the full simulation. Returns path to the output world.db."""
         self._setup()
         try:
-            start_time = datetime(2026, 3, 9, 9, 0, 0)  # Simulated 9:00 AM
-            for tick in range(self.config.num_ticks):
-                sim_time = start_time + timedelta(minutes=tick * self.config.tick_duration_minutes)
+            for i in range(self.config.num_ticks):
+                tick = self._start_tick + i
+                sim_time = self._start_time + timedelta(minutes=tick * self.config.tick_duration_minutes)
                 summary = self._process_tick(tick, sim_time)
                 self._log_tick(summary)
         finally:
@@ -53,13 +55,31 @@ class SimulationEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = output_dir / "world.db"
 
-        print(f"[Sim] Output: {self.db_path}")
+        # 2. If continuing from existing run, copy its DB
+        if self.config.continue_from:
+            src = Path(self.config.continue_from).resolve()
+            if not src.exists():
+                raise FileNotFoundError(f"Cannot continue from {src}: file not found")
+            shutil.copy2(src, self.db_path)
+            print(f"[Sim] Continuing from: {src}")
+            print(f"[Sim] Output: {self.db_path}")
 
-        # 2. Initialize and seed the DB
-        init_db(self.db_path)
-        seed_db(self.db_path)
+            # Read the last tick from sim_clock
+            conn = get_connection(self.db_path)
+            row = conn.execute("SELECT current_tick, sim_time FROM sim_clock WHERE id = 1").fetchone()
+            conn.close()
+            if row:
+                self._start_tick = row["current_tick"] + 1
+                self._start_time = datetime(2026, 3, 9, 9, 0, 0)  # keep base time consistent
+            print(f"[Sim] Resuming from tick {self._start_tick}")
+        else:
+            print(f"[Sim] Output: {self.db_path}")
 
-        # 3. Add simulation tracking tables
+            # Initialize and seed a fresh DB
+            init_db(self.db_path)
+            seed_db(self.db_path)
+
+        # 3. Ensure simulation tracking tables exist (idempotent)
         conn = get_connection(self.db_path)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS sim_clock (
@@ -87,10 +107,11 @@ class SimulationEngine:
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        conn.execute(
-            "INSERT OR REPLACE INTO sim_clock (id, current_tick, sim_time) VALUES (1, 0, ?)",
-            (datetime(2026, 3, 9, 9, 0, 0).isoformat(),),
-        )
+        if not self.config.continue_from:
+            conn.execute(
+                "INSERT OR REPLACE INTO sim_clock (id, current_tick, sim_time) VALUES (1, 0, ?)",
+                (datetime(2026, 3, 9, 9, 0, 0).isoformat(),),
+            )
         conn.commit()
         conn.close()
 

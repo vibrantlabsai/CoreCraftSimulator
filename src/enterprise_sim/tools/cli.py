@@ -408,7 +408,8 @@ def _save_json(data: dict, path: str) -> None:
 @click.option("--output", default=None, type=click.Path(), help="Output directory path")
 @click.option("--max-customers", default=None, type=int, help="Max customer agents to use")
 @click.option("--max-employees", default=None, type=int, help="Max employee agents to use")
-def simulate(ticks, ticket_prob, provider, model, seed, output, max_customers, max_employees):
+@click.option("--continue-from", "continue_from", default=None, type=click.Path(exists=True), help="Path to existing world.db to continue from")
+def simulate(ticks, ticket_prob, provider, model, seed, output, max_customers, max_employees, continue_from):
     """Run a multi-agent world simulation."""
     from enterprise_sim.orchestrator.sim_config import WorldConfig
     from enterprise_sim.orchestrator.simulation_engine import SimulationEngine
@@ -422,6 +423,7 @@ def simulate(ticks, ticket_prob, provider, model, seed, output, max_customers, m
         output_dir=Path(output) if output else None,
         max_customers=max_customers,
         max_employees=max_employees,
+        continue_from=Path(continue_from) if continue_from else None,
     )
     engine = SimulationEngine(config)
     engine.run()

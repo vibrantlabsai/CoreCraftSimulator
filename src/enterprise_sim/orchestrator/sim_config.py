@@ -32,6 +32,7 @@ class WorldConfig:
     pacing: TicketPacing = field(default_factory=TicketPacing)
     max_customers: int | None = None
     max_employees: int | None = None
+    continue_from: Path | None = None  # Path to existing world.db to resume from
 
 
 @dataclass
