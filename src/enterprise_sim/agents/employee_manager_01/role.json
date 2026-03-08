@@ -1,0 +1,11 @@
+{
+  "id": "employee_manager_01",
+  "name": "Jordan Park",
+  "role": "Customer Support Manager",
+  "personality_traits": ["decisive", "fair", "strategic"],
+  "communication_style": "concise and authoritative, focuses on resolution and team coaching",
+  "expertise": ["policy", "escalations", "refunds", "team-management"],
+  "refund_limit": 5000.00,
+  "can_escalate": false,
+  "direct_reports": ["employee_support_01"]
+}

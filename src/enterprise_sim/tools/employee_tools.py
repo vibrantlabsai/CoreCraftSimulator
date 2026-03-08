@@ -1,6 +1,7 @@
 """Employee CLI tools for interacting with the world database."""
 
 import json
+from datetime import datetime
 
 import click
 
@@ -161,5 +162,99 @@ def update_ticket(ticket_id: int, status: str | None, notes: str | None):
             "ticket_id": ticket_id,
             "new_status": status or ticket["status"],
         })
+    finally:
+        conn.close()
+
+
+def _check_channel_membership(conn, agent_id: str, channel_id: str) -> dict | None:
+    """Check if agent is a member of the channel. Returns channel row or None."""
+    channel = conn.execute("SELECT * FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        return None
+    members = json.loads(channel["members"])
+    if agent_id not in members:
+        return None
+    return dict(channel)
+
+
+@click.command("send-msg")
+@click.option("--agent-id", required=True, help="Sender agent ID")
+@click.option("--channel", required=True, help="Channel ID (e.g. '#support', 'dm_support01_manager01')")
+@click.option("--message", required=True, help="Message content")
+def send_msg(agent_id: str, channel: str, message: str):
+    """Send a message to an internal channel."""
+    conn = get_connection()
+    try:
+        ch = _check_channel_membership(conn, agent_id, channel)
+        if ch is None:
+            _json_output({"error": f"Channel '{channel}' not found or you are not a member"})
+            return
+
+        cursor = conn.execute(
+            "INSERT INTO channel_messages (channel_id, sender_id, content) VALUES (?, ?, ?)",
+            (channel, agent_id, message),
+        )
+        conn.commit()
+
+        _json_output({
+            "status": "sent",
+            "message_id": cursor.lastrowid,
+            "channel": channel,
+            "timestamp": datetime.now().isoformat(),
+        })
+    finally:
+        conn.close()
+
+
+@click.command("read-msgs")
+@click.option("--agent-id", required=True, help="Agent ID (for membership check)")
+@click.option("--channel", required=True, help="Channel ID")
+@click.option("--since", default=None, help="Only show messages after this ISO timestamp")
+@click.option("--limit", default=20, type=int, help="Max messages to return (default 20)")
+def read_msgs(agent_id: str, channel: str, since: str | None, limit: int):
+    """Read messages from an internal channel."""
+    conn = get_connection()
+    try:
+        ch = _check_channel_membership(conn, agent_id, channel)
+        if ch is None:
+            _json_output({"error": f"Channel '{channel}' not found or you are not a member"})
+            return
+
+        if since:
+            rows = conn.execute(
+                "SELECT * FROM channel_messages WHERE channel_id = ? AND timestamp > ? ORDER BY id DESC LIMIT ?",
+                (channel, since, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM channel_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?",
+                (channel, limit),
+            ).fetchall()
+
+        messages = [dict(r) for r in reversed(rows)]
+        _json_output({"channel": channel, "count": len(messages), "messages": messages})
+    finally:
+        conn.close()
+
+
+@click.command("list-channels")
+@click.option("--agent-id", required=True, help="Agent ID")
+def list_channels(agent_id: str):
+    """List channels the agent belongs to."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT * FROM channels").fetchall()
+        channels = []
+        for row in rows:
+            members = json.loads(row["members"])
+            if agent_id in members:
+                channels.append({
+                    "id": row["id"],
+                    "type": row["type"],
+                    "members": members,
+                    "member_count": len(members),
+                })
+
+        _json_output({"agent_id": agent_id, "channels": channels})
     finally:
         conn.close()

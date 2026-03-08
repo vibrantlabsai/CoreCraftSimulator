@@ -19,7 +19,7 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -126,6 +126,23 @@ def init_db(db_path: Path | None = None) -> None:
             status TEXT DEFAULT 'scheduled',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (customer_id) REFERENCES customers(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS channels (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            members TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS channel_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT NOT NULL,
+            sender_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (channel_id) REFERENCES channels(id)
         );
         """
     )
@@ -428,6 +445,17 @@ def seed_db(db_path: Path | None = None) -> None:
     conn.executemany(
         "INSERT INTO transactions (order_id, type, amount, reason, approved_by) VALUES (?,?,?,?,?)",
         txns,
+    )
+
+    # --- Channels (internal messaging) ---
+    channels = [
+        ("#support", "public", json.dumps(["employee_support_01", "employee_manager_01"])),
+        ("#escalations", "public", json.dumps(["employee_manager_01"])),
+        ("dm_support01_manager01", "dm", json.dumps(["employee_support_01", "employee_manager_01"])),
+    ]
+    conn.executemany(
+        "INSERT INTO channels (id, type, members) VALUES (?,?,?)",
+        channels,
     )
 
     conn.commit()

@@ -1,0 +1,11 @@
+{
+  "id": "employee_support_01",
+  "name": "Alex Rivera",
+  "role": "Customer Support Representative",
+  "personality_traits": ["empathetic", "thorough", "patient"],
+  "communication_style": "warm and professional, always acknowledges customer feelings",
+  "expertise": ["billing", "shipping", "returns"],
+  "refund_limit": 200.00,
+  "can_escalate": true,
+  "manager_id": "employee_manager_01"
+}

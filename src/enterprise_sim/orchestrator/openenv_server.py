@@ -8,17 +8,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from enterprise_sim.orchestrator.agent_manager import PiAgent
 from enterprise_sim.orchestrator.models import SupportAction, SupportObservation
 from enterprise_sim.orchestrator.reward import SatisfactionTracker, compute_reward
-from enterprise_sim.orchestrator.scenarios import (
-    SCENARIOS,
-    HardcodedScenario,
-    ScenarioConfig,
-)
 from enterprise_sim.orchestrator.world_db import get_connection, get_db_path, init_db, seed_db
 
 
 AVAILABLE_TOOLS = {"lookup_customer", "check_order", "send_reply", "update_ticket"}
+AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 
 
 class CustomerSupportEnv:
@@ -26,33 +23,60 @@ class CustomerSupportEnv:
 
     The Student (LLM being trained) calls reset() to start an episode,
     then repeatedly calls step() with SupportActions until done=True.
+    Customers are generative agents powered by pi-mono.
     """
 
-    def __init__(self, db_path: Path | None = None):
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        provider: str = "openai",
+        model: str = "gpt-5-mini",
+        env: dict[str, str] | None = None,
+    ):
         self.db_path = db_path or get_db_path()
+        self.provider = provider
+        self.model = model
+        self.env = env or {}
         init_db(self.db_path)
         seed_db(self.db_path)
 
-        self.scenario: HardcodedScenario | None = None
+        self.actor: PiAgent | None = None
         self.tracker: SatisfactionTracker | None = None
         self.current_ticket_id: int | None = None
         self.step_count = 0
         self.episode_id = 0
         self.done = False
 
-    def reset(self, scenario_index: int | None = None) -> SupportObservation:
-        """Start a new episode. Picks a scenario, creates a ticket, returns initial observation."""
+        # Discover available customer agent folders
+        self._agent_dirs = sorted(
+            d for d in AGENTS_DIR.iterdir()
+            if d.is_dir() and (d / "persona.json").exists()
+        )
+
+    def reset(self, agent_index: int | None = None) -> SupportObservation:
+        """Start a new episode with a generative customer agent."""
+        # Shutdown previous actor if any
+        if self.actor:
+            self.actor.shutdown()
+
         self.episode_id += 1
         self.step_count = 0
         self.done = False
 
-        # Pick scenario
-        if scenario_index is not None:
-            config = SCENARIOS[scenario_index % len(SCENARIOS)]
+        # Pick agent folder
+        if agent_index is not None:
+            agent_dir = self._agent_dirs[agent_index % len(self._agent_dirs)]
         else:
-            config = random.choice(SCENARIOS)
+            agent_dir = random.choice(self._agent_dirs)
 
-        self.scenario = HardcodedScenario(config)
+        agent_id = agent_dir.name
+
+        # Spawn pi-mono agent and get opening message
+        self.actor = PiAgent(agent_id, agent_dir, self.provider, self.model, self.env)
+        self.actor.spawn()
+        opening_message = self.actor.init_episode()
+
+        config = self.actor.config
         self.tracker = SatisfactionTracker(baseline=config.patience_level)
 
         # Create ticket in DB
@@ -65,7 +89,7 @@ class CustomerSupportEnv:
             self.current_ticket_id = cursor.lastrowid
             conn.execute(
                 "INSERT INTO ticket_messages (ticket_id, sender_id, sender_role, content) VALUES (?, ?, 'customer', ?)",
-                (self.current_ticket_id, config.customer_id, config.opening_message),
+                (self.current_ticket_id, config.customer_id, opening_message),
             )
             conn.commit()
         finally:
@@ -77,7 +101,7 @@ class CustomerSupportEnv:
         )
 
         return SupportObservation(
-            customer_message=config.opening_message,
+            customer_message=opening_message,
             tool_result="",
             ticket_context=ticket_context,
             internal_messages="",
@@ -107,8 +131,8 @@ class CustomerSupportEnv:
         else:
             tool_result = self._execute_tool(action.tool_name, action.tool_args)
 
-        # 2. Get customer response from scenario
-        response = self.scenario.respond(action.tool_name, action.tool_args)
+        # 2. Get customer response from actor
+        response = self.actor.respond(action.tool_name, action.tool_args)
         customer_message = response.customer_message
         self.tracker.update(response.satisfaction_delta)
 
@@ -118,7 +142,7 @@ class CustomerSupportEnv:
             try:
                 conn.execute(
                     "INSERT INTO ticket_messages (ticket_id, sender_id, sender_role, content) VALUES (?, ?, 'customer', ?)",
-                    (self.current_ticket_id, self.scenario.config.customer_id, customer_message),
+                    (self.current_ticket_id, self.actor.config.customer_id, customer_message),
                 )
                 conn.commit()
             finally:
@@ -126,8 +150,9 @@ class CustomerSupportEnv:
 
         # 4. Check done conditions
         resolved = response.is_resolved
-        if resolved or self.tracker.abandoned or self.step_count >= self.scenario.max_steps:
+        if resolved or self.tracker.abandoned or self.step_count >= self.actor.max_steps:
             self.done = True
+            self.actor.shutdown()
 
         # 5. Compute reward
         reward = compute_reward(resolved, self.tracker.score, self.step_count) if self.done else 0.0
@@ -147,7 +172,7 @@ class CustomerSupportEnv:
                 "step_count": self.step_count,
                 "satisfaction": self.tracker.score,
                 "resolved": resolved,
-                "customer_id": self.scenario.config.customer_id,
+                "customer_id": self.actor.config.customer_id,
                 "ticket_id": self.current_ticket_id,
             },
         )
@@ -197,7 +222,7 @@ class CustomerSupportEnv:
             if not ticket:
                 return ""
             return (
-                f"Ticket #{ticket['id']} | Customer: {self.scenario.config.customer_name} "
+                f"Ticket #{ticket['id']} | Customer: {self.actor.config.customer_name} "
                 f"| Subject: {ticket['subject']} | Status: {ticket['status']}"
             )
         finally:
