@@ -1,4 +1,4 @@
-"""Generate architecture diagram for EnterpriseSim as SVG.
+"""Generate architecture diagram for CoreCraftSim as SVG.
 
 Usage:
   uv run python openenv_pkg/scripts/plot_arch.py
@@ -157,7 +157,7 @@ def main():
     parts.append(svg_rect(0, 0, W, H, rx=16, fill="#f7f8fa", stroke="#dee2e6", stroke_width=2))
 
     # ── Title ──
-    parts.append(svg_text(W/2, 36, "EnterpriseSim  —  Architecture",
+    parts.append(svg_text(W/2, 36, "CoreCraftSim  —  Architecture",
                           size=26, fill="#1a1a2e", weight="bold"))
     parts.append(svg_text(W/2, 62, "Multi-Agent Customer Support Simulation Environment",
                           size=13, fill="#888"))
